@@ -39,7 +39,49 @@ Thumbs.db
 
 # Specific to this demo #
 #########################
-data/
+data/work/
 protos/
 utils/
 *.pth
+venv/
+
+# Python cache #
+################
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+
+# Virtual environments #
+########################
+venv/
+env/
+.env/
+.venv/
+
+# IDE/Editor files #
+####################
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook #
+####################
+.ipynb_checkpoints/
+
+# Model files (large) #
+#######################
+*.model
+*.pt
+*.pth
+*.onnx
+
+# Temporary files #
+###################
+*.tmp
+*.temp
+tmp/
+temp/

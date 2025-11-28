@@ -40,22 +40,23 @@ class SyncNetInstance_FCN(torch.nn.Module):
         
         self.embedding_dim = embedding_dim
         self.max_offset = max_offset
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Initialize model
         if use_attention:
             self.model = SyncNetFCN_WithAttention(
                 embedding_dim=embedding_dim,
                 max_offset=max_offset
-            ).cuda()
+            ).to(self.device)
         else:
             self.model = SyncNetFCN(
                 embedding_dim=embedding_dim,
                 max_offset=max_offset
-            ).cuda()
+            ).to(self.device)
     
     def loadParameters(self, path):
         """Load model parameters from checkpoint."""
-        loaded_state = torch.load(path, map_location='cuda')
+        loaded_state = torch.load(path, map_location=self.device)
         
         # Handle different checkpoint formats
         if isinstance(loaded_state, dict):
@@ -230,8 +231,8 @@ class SyncNetInstance_FCN(torch.nn.Module):
         tS = time.time()
         with torch.no_grad():
             sync_probs, audio_feat, video_feat = self.model(
-                audio_tensor.cuda(),
-                video_tensor.cuda()
+                audio_tensor.to(self.device),
+                video_tensor.to(self.device)
             )
         
         print(f'Compute time: {time.time()-tS:.3f} sec')
@@ -324,8 +325,8 @@ class SyncNetInstance_FCN(torch.nn.Module):
             # Forward pass
             with torch.no_grad():
                 sync_probs, _, _ = self.model(
-                    audio_chunk.cuda(),
-                    video_chunk.cuda()
+                    audio_chunk.to(self.device),
+                    video_chunk.to(self.device)
                 )
             
             # Compute offsets
@@ -384,11 +385,11 @@ class SyncNetInstance_FCN(torch.nn.Module):
         # Extract features
         with torch.no_grad():
             if feature_type in ['audio', 'both']:
-                audio_features = self.model.forward_audio(audio_tensor.cuda())
+                audio_features = self.model.forward_audio(audio_tensor.to(self.device))
                 features['audio'] = audio_features.cpu().numpy()
             
             if feature_type in ['video', 'both']:
-                video_features = self.model.forward_video(video_tensor.cuda())
+                video_features = self.model.forward_video(video_tensor.to(self.device))
                 features['video'] = video_features.cpu().numpy()
         
         return features
