@@ -20,6 +20,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
+import cv2
+import os
+import subprocess
+from scipy.io import wavfile
+import python_speech_features
+from collections import OrderedDict
 
 
 class TemporalCorrelation(nn.Module):
@@ -233,10 +240,12 @@ class FCN_VideoEncoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1,3,3), stride=(1,2,2), padding=(0,1,1)),
             
-            # Layer 6 - Spatial pooling to 1×1
-            nn.Conv3d(256, 512, kernel_size=(3,6,6), stride=(1,1,1), padding=(1,0,0)),
+            # Layer 6 - Reduce spatial dimension
+            nn.Conv3d(256, 512, kernel_size=(3,3,3), stride=(1,1,1), padding=(1,1,1)),
             nn.BatchNorm3d(512),
             nn.ReLU(inplace=True),
+            # Adaptive pooling to 1x1 spatial
+            nn.AdaptiveAvgPool3d((None, 1, 1))  # Keep temporal, pool spatial to 1x1
         )
         
         # 1×1 conv to adjust channels (replaces FC layer)
@@ -450,6 +459,303 @@ class SyncNetFCN_WithAttention(SyncNetFCN):
         sync_probs = F.softmax(sync_logits, dim=1)
         
         return sync_probs, audio_features, video_features
+
+
+class StreamSyncFCN(nn.Module):
+    """
+    StreamSync-style FCN with built-in preprocessing and transfer learning.
+    
+    Features:
+    1. Sliding window processing for streams
+    2. HLS stream support (.m3u8)
+    3. Raw video file processing (MP4, AVI, etc.)
+    4. Automatic transfer learning from Sync NetModel.py
+    5. Temporal buffering and smoothing
+    """
+    
+    def __init__(self, embedding_dim=512, max_offset=15,
+                 window_size=25, stride=5, buffer_size=100,
+                 use_attention=False, pretrained_syncnet_path=None,
+                 auto_load_pretrained=True):
+        """
+        Args:
+            embedding_dim: Feature dimension
+            max_offset: Maximum temporal offset (frames)
+            window_size: Frames per processing window
+            stride: Window stride
+            buffer_size: Temporal buffer size
+            use_attention: Use attention model
+            pretrained_syncnet_path: Path to original SyncNet weights
+            auto_load_pretrained: Auto-load pretrained weights if path provided
+        """
+        super(StreamSyncFCN, self).__init__()
+        
+        self.window_size = window_size
+        self.stride = stride
+        self.buffer_size = buffer_size
+        self.max_offset = max_offset
+        
+        # Initialize FCN model
+        if use_attention:
+            self.fcn_model = SyncNetFCN_WithAttention(embedding_dim, max_offset)
+        else:
+            self.fcn_model = SyncNetFCN(embedding_dim, max_offset)
+        
+        # Auto-load pretrained weights
+        if auto_load_pretrained and pretrained_syncnet_path:
+            self.load_pretrained_syncnet(pretrained_syncnet_path)
+        
+        self.reset_buffers()
+    
+    def reset_buffers(self):
+        """Reset temporal buffers."""
+        self.offset_buffer = []
+        self.confidence_buffer = []
+        self.frame_count = 0
+    
+    def load_pretrained_syncnet(self, syncnet_model_path, freeze_conv=True, verbose=True):
+        """
+        Load conv layers from original SyncNet (SyncNetModel.py).
+        Maps: netcnnaud.* → audio_encoder.conv_layers.*
+              netcnnlip.* → video_encoder.conv_layers.*
+        """
+        if verbose:
+            print(f"Loading pretrained SyncNet from: {syncnet_model_path}")
+        
+        try:
+            pretrained = torch.load(syncnet_model_path, map_location='cpu')
+            if isinstance(pretrained, dict):
+                pretrained_dict = pretrained.get('model_state_dict', pretrained.get('state_dict', pretrained))
+            else:
+                pretrained_dict = pretrained.state_dict()
+            
+            fcn_dict = self.fcn_model.state_dict()
+            loaded_count = 0
+            
+            # Map audio conv layers
+            for key in list(pretrained_dict.keys()):
+                if key.startswith('netcnnaud.'):
+                    idx = key.split('.')[1]
+                    param = '.'.join(key.split('.')[2:])
+                    new_key = f'audio_encoder.conv_layers.{idx}.{param}'
+                    if new_key in fcn_dict and pretrained_dict[key].shape == fcn_dict[new_key].shape:
+                        fcn_dict[new_key] = pretrained_dict[key]
+                        loaded_count += 1
+                
+                # Map video conv layers
+                elif key.startswith('netcnnlip.'):
+                    idx = key.split('.')[1]
+                    param = '.'.join(key.split('.')[2:])
+                    new_key = f'video_encoder.conv_layers.{idx}.{param}'
+                    if new_key in fcn_dict and pretrained_dict[key].shape == fcn_dict[new_key].shape:
+                        fcn_dict[new_key] = pretrained_dict[key]
+                        loaded_count += 1
+            
+            self.fcn_model.load_state_dict(fcn_dict, strict=False)
+            
+            if verbose:
+                print(f"✓ Loaded {loaded_count} pretrained conv parameters")
+            
+            # Freeze conv layers
+            if freeze_conv:
+                for name, param in self.fcn_model.named_parameters():
+                    if 'conv_layers' in name:
+                        param.requires_grad = False
+                if verbose:
+                    print("✓ Froze pretrained conv layers")
+                    
+        except Exception as e:
+            if verbose:
+                print(f"⚠ Could not load pretrained weights: {e}")
+    
+    def forward(self, audio_mfcc, video_frames):
+        """Forward pass through FCN model."""
+        return self.fcn_model(audio_mfcc, video_frames)
+    
+    def process_window(self, audio_window, video_window):
+        """Process single window."""
+        with torch.no_grad():
+            sync_probs, _, _ = self.fcn_model(audio_window, video_window)
+            offsets, confidences = self.fcn_model.compute_offset(sync_probs)
+        return offsets[0].mean().item(), confidences[0].mean().item()
+    
+    def process_stream(self, audio_stream, video_stream, return_trace=False):
+        """Process full stream with sliding windows."""
+        self.reset_buffers()
+        
+        video_frames = video_stream.shape[2]
+        audio_frames = audio_stream.shape[3] // 4
+        min_frames = min(video_frames, audio_frames)
+        num_windows = max(1, (min_frames - self.window_size) // self.stride + 1)
+        
+        trace = {'offsets': [], 'confidences': [], 'timestamps': []}
+        
+        for win_idx in range(num_windows):
+            start = win_idx * self.stride
+            end = min(start + self.window_size, min_frames)
+            
+            video_win = video_stream[:, :, start:end, :, :]
+            audio_win = audio_stream[:, :, :, start*4:end*4]
+            
+            offset, confidence = self.process_window(audio_win, video_win)
+            
+            self.offset_buffer.append(offset)
+            self.confidence_buffer.append(confidence)
+            
+            if return_trace:
+                trace['offsets'].append(offset)
+                trace['confidences'].append(confidence)
+                trace['timestamps'].append(start)
+            
+            if len(self.offset_buffer) > self.buffer_size:
+                self.offset_buffer.pop(0)
+                self.confidence_buffer.pop(0)
+            
+            self.frame_count = end
+        
+        final_offset, final_conf = self.get_smoothed_prediction()
+        
+        return (final_offset, final_conf, trace) if return_trace else (final_offset, final_conf)
+    
+    def get_smoothed_prediction(self, method='confidence_weighted'):
+        """Compute smoothed offset from buffer."""
+        if not self.offset_buffer:
+            return 0.0, 0.0
+        
+        offsets = torch.tensor(self.offset_buffer)
+        confs = torch.tensor(self.confidence_buffer)
+        
+        if method == 'confidence_weighted':
+            weights = confs / (confs.sum() + 1e-8)
+            offset = (offsets * weights).sum().item()
+        elif method == 'median':
+            offset = torch.median(offsets).item()
+        else:
+            offset = torch.mean(offsets).item()
+        
+        return offset, torch.mean(confs).item()
+    
+    def extract_audio_mfcc(self, video_path, temp_dir='temp'):
+        """Extract audio and compute MFCC."""
+        os.makedirs(temp_dir, exist_ok=True)
+        audio_path = os.path.join(temp_dir, 'temp_audio.wav')
+        
+        cmd = ['ffmpeg', '-y', '-i', video_path, '-ac', '1', '-ar', '16000',
+               '-vn', '-acodec', 'pcm_s16le', audio_path]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        sample_rate, audio = wavfile.read(audio_path)
+        mfcc = python_speech_features.mfcc(audio, sample_rate).T
+        mfcc_tensor = torch.FloatTensor(mfcc).unsqueeze(0).unsqueeze(0)
+        
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        
+        return mfcc_tensor
+    
+    def extract_video_frames(self, video_path, target_size=(112, 112)):
+        """Extract video frames as tensor."""
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = cv2.resize(frame, target_size)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame.astype(np.float32) / 255.0)
+        
+        cap.release()
+        
+        if not frames:
+            raise ValueError(f"No frames extracted from {video_path}")
+        
+        frames_array = np.stack(frames, axis=0)
+        video_tensor = torch.FloatTensor(frames_array).permute(3, 0, 1, 2).unsqueeze(0)
+        
+        return video_tensor
+    
+    def process_video_file(self, video_path, return_trace=False, temp_dir='temp',
+                          target_size=(112, 112), verbose=True):
+        """
+        Process raw video file (MP4, AVI, MOV, etc.).
+        
+        Args:
+            video_path: Path to video file
+            return_trace: Return per-window predictions
+            temp_dir: Temporary directory
+            target_size: Video frame size
+            verbose: Print progress
+            
+        Returns:
+            offset: Detected offset (frames)
+            confidence: Detection confidence
+            trace: (optional) Per-window data
+            
+        Example:
+            >>> model = StreamSyncFCN(pretrained_syncnet_path='data/syncnet_v2.model')
+            >>> offset, conf = model.process_video_file('video.mp4')
+        """
+        if verbose:
+            print(f"Processing: {video_path}")
+        
+        mfcc = self.extract_audio_mfcc(video_path, temp_dir)
+        video = self.extract_video_frames(video_path, target_size)
+        
+        if verbose:
+            print(f"  Audio: {mfcc.shape}, Video: {video.shape}")
+        
+        result = self.process_stream(mfcc, video, return_trace)
+        
+        if verbose:
+            offset, conf = result[:2]
+            print(f"  Offset: {offset:.2f} frames, Confidence: {conf:.3f}")
+        
+        return result
+    
+    def process_hls_stream(self, hls_url, segment_duration=10, return_trace=False,
+                          temp_dir='temp_hls', verbose=True):
+        """
+        Process HLS stream (.m3u8 playlist).
+        
+        Args:
+            hls_url: URL to .m3u8 playlist
+            segment_duration: Seconds to capture
+            return_trace: Return per-window predictions
+            temp_dir: Temporary directory
+            verbose: Print progress
+            
+        Returns:
+            offset: Detected offset
+            confidence: Detection confidence
+            trace: (optional) Per-window data
+            
+        Example:
+            >>> model = StreamSyncFCN(pretrained_syncnet_path='data/syncnet_v2.model')
+           >>> offset, conf = model.process_hls_stream('http://example.com/stream.m3u8')
+        """
+        if verbose:
+            print(f"Processing HLS: {hls_url}")
+        
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_video = os.path.join(temp_dir, 'hls_segment.mp4')
+        
+        try:
+            cmd = ['ffmpeg', '-y', '-i', hls_url, '-t', str(segment_duration),
+                   '-c', 'copy', temp_video]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          check=True, timeout=segment_duration + 30)
+            
+            result = self.process_video_file(temp_video, return_trace, temp_dir, verbose=verbose)
+            
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"HLS processing failed: {e}")
+        finally:
+            if os.path.exists(temp_video):
+                os.remove(temp_video)
 
 
 # Utility functions
