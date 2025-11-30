@@ -59,15 +59,27 @@ class VoxCeleb2Dataset(Dataset):
             # Extract audio using FFmpeg
             cmd = ['ffmpeg', '-y', '-i', video_path, '-ac', '1', '-ar', '16000',
                    '-vn', '-acodec', 'pcm_s16le', audio_path]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
-                          check=True, timeout=30)
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, 
+                                   timeout=30)
+            
+            if result.returncode != 0:
+                raise RuntimeError(f"FFmpeg failed for {video_path}")
             
             # Read audio and compute MFCC
-            sample_rate, audio = wavfile.read(audio_path)
+            audio_data = wavfile.read(audio_path)
+            # Handle both (sample_rate, audio) and other return formats
+            if len(audio_data) == 2:
+                sample_rate, audio = audio_data
+            else:
+                raise ValueError(f"Unexpected wavfile.read output: {len(audio_data)} values")
+            
+            # Ensure audio is 1D
+            if len(audio.shape) > 1:
+                audio = audio.mean(axis=1)
+            
             mfcc = python_speech_features.mfcc(audio, sample_rate, numcep=13)
             
-            # Shape: [T, 13] -> [13, T] -> [1, 13, T]
-            # Need to add channel dimension: [1, 13, T] -> [1, 1, 13, T] for model
+            # Shape: [T, 13] -> [13, T] -> [1, 1, 13, T]
             mfcc_tensor = torch.FloatTensor(mfcc.T).unsqueeze(0).unsqueeze(0)  # [1, 1, 13, T]
             
             # Clean up temp file
@@ -184,7 +196,9 @@ class VoxCeleb2Dataset(Dataset):
             
         except Exception as e:
             # Fallback to dummy data if preprocessing fails
-            print(f"Warning: Failed to process {video_path}: {e}")
+            # Only print occasionally to avoid spam
+            if random.random() < 0.01:  # Print 1% of errors
+                print(f"Warning: Failed to process {os.path.basename(video_path)}: {str(e)[:50]}")
             audio = torch.randn(1, 13, self.video_length * 4)
             video = torch.randn(3, self.video_length, 112, 112)
             offset = 0
