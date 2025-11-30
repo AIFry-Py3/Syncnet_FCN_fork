@@ -285,15 +285,20 @@ class FCN_VideoEncoder(nn.Module):
 
 class SyncNetFCN(nn.Module):
     """
-    Fully Convolutional SyncNet with temporal outputs.
+    Fully Convolutional SyncNet with temporal outputs (REGRESSION VERSION).
     
     Architecture:
     1. Audio encoder: MFCC → temporal features
     2. Video encoder: frames → temporal features
     3. Correlation layer: compute audio-video similarity over time
-    4. Sync predictor: predict sync probability for each frame
+    4. Offset regressor: predict continuous offset value for each frame
+    
+    Changes from classification version:
+    - Output: [B, 1, T] continuous offset values (not probability distribution)
+    - Default max_offset: 125 frames (±5 seconds at 25fps) for streaming
+    - Loss: L1/MSE instead of CrossEntropy
     """
-    def __init__(self, embedding_dim=512, max_offset=15):
+    def __init__(self, embedding_dim=512, max_offset=125):
         super(SyncNetFCN, self).__init__()
         
         self.embedding_dim = embedding_dim
@@ -306,23 +311,23 @@ class SyncNetFCN(nn.Module):
         # Temporal correlation
         self.correlation = TemporalCorrelation(max_displacement=max_offset)
         
-        # Sync predictor (processes correlation map)
-        self.sync_predictor = nn.Sequential(
+        # Offset regressor (processes correlation map) - REGRESSION OUTPUT
+        self.offset_regressor = nn.Sequential(
             nn.Conv1d(2*max_offset+1, 128, kernel_size=3, padding=1),
             nn.BatchNorm1d(128),
             nn.ReLU(inplace=True),
             nn.Conv1d(128, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
-            nn.Conv1d(64, 2*max_offset+1, kernel_size=1),  # Output: prob for each offset
+            nn.Conv1d(64, 1, kernel_size=1),  # Output: single continuous offset value
         )
         
         # Optional: Temporal smoothing with dilated convolutions
         self.temporal_smoother = nn.Sequential(
-            nn.Conv1d(2*max_offset+1, 64, kernel_size=3, dilation=2, padding=2),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(1, 32, kernel_size=3, dilation=2, padding=2),
+            nn.BatchNorm1d(32),
             nn.ReLU(inplace=True),
-            nn.Conv1d(64, 2*max_offset+1, kernel_size=1),
+            nn.Conv1d(32, 1, kernel_size=1),
         )
         
     def forward_audio(self, audio_mfcc):
@@ -335,14 +340,14 @@ class SyncNetFCN(nn.Module):
     
     def forward(self, audio_mfcc, video_frames):
         """
-        Forward pass with audio-video sync prediction.
+        Forward pass with audio-video offset regression.
         
         Args:
             audio_mfcc: [B, 1, F, T] - MFCC features
             video_frames: [B, 3, T', H, W] - video frames
             
         Returns:
-            sync_probs: [B, 2*max_offset+1, T''] - sync probability for each offset and time
+            predicted_offsets: [B, 1, T''] - predicted offset in frames for each timestep
             audio_features: [B, C, T_a] - audio embeddings
             video_features: [B, C, T_v] - video embeddings
         """
@@ -358,35 +363,36 @@ class SyncNetFCN(nn.Module):
         # Compute correlation
         correlation = self.correlation(video_features, audio_features)  # [B, 2*K+1, T]
         
-        # Predict sync probabilities
-        sync_logits = self.sync_predictor(correlation)  # [B, 2*K+1, T]
-        sync_logits = self.temporal_smoother(sync_logits)  # Temporal smoothing
+        # Predict offset (regression)
+        offset_logits = self.offset_regressor(correlation)  # [B, 1, T]
+        predicted_offsets = self.temporal_smoother(offset_logits)  # Temporal smoothing
         
-        # Apply softmax over offset dimension
-        sync_probs = F.softmax(sync_logits, dim=1)  # [B, 2*K+1, T]
+        # Clamp to valid range
+        predicted_offsets = torch.clamp(predicted_offsets, -self.max_offset, self.max_offset)
         
-        return sync_probs, audio_features, video_features
+        return predicted_offsets, audio_features, video_features
     
-    def compute_offset(self, sync_probs):
+    def compute_offset(self, predicted_offsets):
         """
-        Compute offset from sync probability map.
+        Extract offset and confidence from regression predictions.
         
         Args:
-            sync_probs: [B, 2*K+1, T] - sync probabilities
+            predicted_offsets: [B, 1, T] - predicted offsets
             
         Returns:
             offsets: [B, T] - predicted offset for each frame
-            confidences: [B, T] - confidence scores
+            confidences: [B, T] - confidence scores (inverse of variance)
         """
-        # Find most likely offset for each time step
-        max_probs, max_indices = torch.max(sync_probs, dim=1)  # [B, T]
+        # Remove channel dimension
+        offsets = predicted_offsets.squeeze(1)  # [B, T]
         
-        # Convert indices to offsets
-        offsets = self.max_offset - max_indices  # [B, T]
+        # Confidence = inverse of temporal variance (stable predictions = high confidence)
+        temporal_variance = torch.var(offsets, dim=1, keepdim=True) + 1e-6  # [B, 1]
+        confidences = 1.0 / temporal_variance  # [B, 1]
+        confidences = confidences.expand_as(offsets)  # [B, T]
         
-        # Confidence = max_prob - median_prob
-        median_probs = torch.median(sync_probs, dim=1)[0]  # [B, T]
-        confidences = max_probs - median_probs  # [B, T]
+        # Normalize confidence to [0, 1]
+        confidences = torch.sigmoid(confidences - 5.0)  # Shift to reasonable range
         
         return offsets, confidences
 
