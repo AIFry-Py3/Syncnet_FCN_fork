@@ -18,7 +18,7 @@
 ### Start Fresh Training (Recommended)
 ```powershell
 .\\venv\\Scripts\\python.exe train_syncnet_fcn_improved.py `
-    --data_dir E:/voxceleb2_dataset/VoxCeleb2/dev `
+    --data_dir "E:/voxc2/vox2_dev_mp4_partaa~/dev/mp4" `
     --pretrained_model data/syncnet_v2.model `
     --batch_size 4 `
     --epochs 30 `
@@ -37,7 +37,7 @@
 ### Training with Attention
 ```powershell
 .\\venv\\Scripts\\python.exe train_syncnet_fcn_improved.py `
-    --data_dir E:/voxceleb2_dataset/VoxCeleb2/dev `
+    --data_dir "E:/voxc2/vox2_dev_mp4_partaa~/dev/mp4" `
     --pretrained_model data/syncnet_v2.model `
     --batch_size 2 `
     --epochs 30 `

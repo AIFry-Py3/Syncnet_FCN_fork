@@ -337,8 +337,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch_num):
         predicted_offsets, _, _ = model(audio, video)
         
         # Compute losses
-        offset_loss = criterion(sync_probs, offsets)
-        consistency_loss = temporal_consistency_loss(sync_probs)
+        offset_loss = criterion(predicted_offsets, offsets)
+        consistency_loss = temporal_consistency_loss(predicted_offsets)
         
         # Combined loss
         loss = offset_loss + 0.1 * consistency_loss
@@ -354,7 +354,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, epoch_num):
         
         # Compute metrics
         with torch.no_grad():
-            metrics = compute_metrics(sync_probs, offsets)
+            metrics = compute_metrics(predicted_offsets, offsets)
             for key in metrics_accum:
                 metrics_accum[key] += metrics[key]
         
