@@ -196,6 +196,134 @@ def api_analyze():
                 pass
 
 
+@app.route('/api/analyze-stream', methods=['POST'])
+def api_analyze_stream():
+    """Analyze a HLS stream URL for audio-video sync."""
+    start_time = time.time()
+    temp_video_path = None
+    temp_dir = None
+    
+    try:
+        # Get JSON data
+        data = request.get_json()
+        if not data or 'url' not in data:
+            return jsonify({'error': 'No stream URL provided'}), 400
+        
+        stream_url = data['url']
+        
+        # Validate URL
+        if not stream_url.startswith(('http://', 'https://')):
+            return jsonify({'error': 'Invalid URL. Must start with http:// or https://'}), 400
+        
+        # Get settings
+        window_size = int(data.get('window_size', 25))
+        stride = int(data.get('stride', 5))
+        buffer_size = int(data.get('buffer_size', 100))
+        
+        # Validate settings
+        window_size = max(5, min(100, window_size))
+        stride = max(1, min(50, stride))
+        buffer_size = max(10, min(500, buffer_size))
+        
+        # Create temp directory
+        temp_dir = tempfile.mkdtemp(prefix='syncnet_stream_')
+        temp_video_path = os.path.join(temp_dir, 'stream_sample.mp4')
+        
+        # Download a segment of the stream using ffmpeg (10 seconds)
+        import subprocess
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', stream_url,
+            '-t', '10',  # 10 seconds
+            '-c', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            temp_video_path
+        ]
+        
+        print(f"Downloading stream: {stream_url}")
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60  # 60 second timeout
+        )
+        
+        if result.returncode != 0 or not os.path.exists(temp_video_path):
+            # Try alternative approach without codec copy
+            ffmpeg_cmd = [
+                'ffmpeg', '-y',
+                '-i', stream_url,
+                '-t', '10',
+                '-c:v', 'libx264',
+                '-c:a', 'aac',
+                temp_video_path
+            ]
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode != 0 or not os.path.exists(temp_video_path):
+                return jsonify({'error': f'Failed to download stream. FFmpeg error: {result.stderr[:500]}'}), 400
+        
+        # Get model
+        model = get_model(
+            window_size=window_size,
+            stride=stride,
+            buffer_size=buffer_size
+        )
+        
+        # Process video
+        proc_result = model.process_video_file(
+            video_path=temp_video_path,
+            return_trace=False,
+            temp_dir=temp_dir,
+            target_size=(112, 112),
+            verbose=False
+        )
+        
+        if proc_result is None:
+            return jsonify({'error': 'Failed to process stream. Check if stream has audio track.'}), 400
+        
+        offset, confidence = proc_result
+        processing_time = time.time() - start_time
+        
+        # Extract stream name from URL
+        stream_name = stream_url.split('/')[-1][:50] if '/' in stream_url else stream_url[:50]
+        
+        return jsonify({
+            'success': True,
+            'video_name': stream_name,
+            'source_url': stream_url,
+            'offset_frames': float(offset),
+            'offset_seconds': float(offset / 25.0),
+            'confidence': float(confidence),
+            'processing_time': float(processing_time),
+            'settings': {
+                'window_size': window_size,
+                'stride': stride,
+                'buffer_size': buffer_size
+            }
+        })
+        
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Stream download timed out. The stream may be slow or unavailable.'}), 408
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+        
+    finally:
+        # Cleanup
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except:
+                pass
+
+
 # ========================================
 # Main
 # ========================================

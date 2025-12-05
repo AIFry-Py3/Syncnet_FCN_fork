@@ -166,6 +166,114 @@ body {
     gap: var(--space-md);
 }
 
+/* Input Tabs */
+.input-tabs {
+    display: flex;
+    gap: var(--space-sm);
+    padding: var(--space-xs);
+    background-color: var(--bg-secondary);
+    border-radius: var(--radius-md);
+}
+
+.tab-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.tab-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+.tab-btn:hover {
+    color: var(--text-secondary);
+    background-color: var(--bg-tertiary);
+}
+
+.tab-btn.active {
+    color: var(--accent);
+    background-color: var(--accent-subtle);
+}
+
+/* Stream URL Input */
+.stream-input {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-md);
+    padding: var(--space-lg);
+    background-color: var(--bg-secondary);
+    border: 2px solid var(--border-default);
+    border-radius: var(--radius-xl);
+}
+
+.stream-icon {
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--accent-subtle);
+    border-radius: var(--radius-md);
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.stream-icon svg {
+    width: 24px;
+    height: 24px;
+}
+
+.stream-field {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.stream-field label {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.stream-field input {
+    width: 100%;
+    padding: var(--space-md);
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+}
+
+.stream-field input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.stream-field input::placeholder {
+    color: var(--text-muted);
+}
+
+.stream-hint {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
 .upload-area {
     border: 2px dashed var(--border-default);
     border-radius: var(--radius-xl);

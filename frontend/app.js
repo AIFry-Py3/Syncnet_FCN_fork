@@ -1,6 +1,6 @@
 /**
  * SyncNet FCN - Frontend JavaScript
- * Handles video upload, API communication, and results display
+ * Handles video upload, stream URLs, API communication, and results display
  */
 
 // DOM Elements
@@ -17,8 +17,15 @@ const resultsSection = document.getElementById('resultsSection');
 const errorModal = document.getElementById('errorModal');
 const closeModal = document.getElementById('closeModal');
 
+// Tab Elements
+const tabFile = document.getElementById('tabFile');
+const tabStream = document.getElementById('tabStream');
+const streamInput = document.getElementById('streamInput');
+const hlsUrlInput = document.getElementById('hlsUrl');
+
 // State
 let selectedFile = null;
+let inputMode = 'file'; // 'file' or 'stream'
 
 // Settings Elements
 const windowSizeInput = document.getElementById('windowSize');
@@ -41,6 +48,58 @@ const fixText = document.getElementById('fixText');
 
 // API Base URL
 const API_BASE = window.location.origin;
+
+// ========================================
+// Tab Switching
+// ========================================
+
+tabFile.addEventListener('click', () => switchTab('file'));
+tabStream.addEventListener('click', () => switchTab('stream'));
+
+function switchTab(mode) {
+    inputMode = mode;
+    
+    // Update tab buttons
+    tabFile.classList.toggle('active', mode === 'file');
+    tabStream.classList.toggle('active', mode === 'stream');
+    
+    // Show/hide input areas
+    if (mode === 'file') {
+        uploadArea.classList.remove('hidden');
+        streamInput.classList.add('hidden');
+        fileInfo.classList.add('hidden');
+        // Enable analyze if file selected
+        analyzeBtn.disabled = !selectedFile;
+    } else {
+        uploadArea.classList.add('hidden');
+        streamInput.classList.remove('hidden');
+        fileInfo.classList.add('hidden');
+        // Enable analyze if URL entered
+        updateStreamAnalyzeButton();
+    }
+    
+    // Clear previous results
+    resultsSection.classList.add('hidden');
+}
+
+// HLS URL input handler
+hlsUrlInput.addEventListener('input', updateStreamAnalyzeButton);
+
+function updateStreamAnalyzeButton() {
+    if (inputMode === 'stream') {
+        const url = hlsUrlInput.value.trim();
+        analyzeBtn.disabled = !url || !isValidUrl(url);
+    }
+}
+
+function isValidUrl(string) {
+    try {
+        new URL(string);
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
 
 // ========================================
 // Event Listeners
@@ -90,8 +149,10 @@ settingsToggle.addEventListener('click', () => {
 
 // Analyze Button
 analyzeBtn.addEventListener('click', () => {
-    if (selectedFile) {
+    if (inputMode === 'file' && selectedFile) {
         analyzeVideo();
+    } else if (inputMode === 'stream' && hlsUrlInput.value.trim()) {
+        analyzeStream();
     }
 });
 
@@ -190,7 +251,7 @@ function setLoading(loading) {
 }
 
 /**
- * Analyze video via API
+ * Analyze video file via API
  */
 async function analyzeVideo() {
     if (!selectedFile) return;
@@ -227,15 +288,54 @@ async function analyzeVideo() {
 }
 
 /**
+ * Analyze HLS stream via API
+ */
+async function analyzeStream() {
+    const streamUrl = hlsUrlInput.value.trim();
+    if (!streamUrl) return;
+    
+    setLoading(true);
+    
+    try {
+        const response = await fetch(`${API_BASE}/api/analyze-stream`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                url: streamUrl,
+                window_size: parseInt(windowSizeInput.value),
+                stride: parseInt(strideInput.value),
+                buffer_size: parseInt(bufferSizeInput.value)
+            })
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `Server error: ${response.status}`);
+        }
+        
+        const result = await response.json();
+        displayResults(result, streamUrl);
+        
+    } catch (error) {
+        console.error('Stream analysis error:', error);
+        showError('Stream Analysis Failed', error.message || 'Failed to analyze stream. Please check the URL and try again.');
+    } finally {
+        setLoading(false);
+    }
+}
+
+/**
  * Display analysis results
  */
-function displayResults(result) {
+function displayResults(result, sourceUrl = null) {
     resultsSection.classList.remove('hidden');
     
     const offset = result.offset_frames;
     const confidence = result.confidence;
     const time = result.processing_time;
-    const video = result.video_name || selectedFile.name;
+    const video = result.video_name || sourceUrl || (selectedFile ? selectedFile.name : 'Stream');
     
     // Update offset
     offsetFrames.textContent = offset >= 0 ? `+${offset.toFixed(1)}` : offset.toFixed(1);
@@ -248,7 +348,7 @@ function displayResults(result) {
     
     // Update processing time
     processingTime.textContent = time.toFixed(2);
-    videoName.textContent = video;
+    videoName.textContent = video.length > 40 ? video.substring(0, 40) + '...' : video;
     
     // Determine sync status
     const isSynced = Math.abs(offset) <= 2; // Within 2 frames is considered synced
