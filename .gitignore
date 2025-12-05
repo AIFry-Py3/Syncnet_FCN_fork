@@ -42,8 +42,6 @@ Thumbs.db
 data/work/
 protos/
 utils/
-*.pth
-venv/
 
 # Python cache #
 ################
@@ -67,16 +65,21 @@ env/
 *.swp
 *.swo
 *~
+.history/
 
 # Jupyter Notebook #
 ####################
 .ipynb_checkpoints/
 
-# Model files (large) #
-#######################
-*.model
-*.pt
+# Model files (large - keep pretrained, ignore trained) #
+#########################################################
+# Keep: data/syncnet_v2.model (pretrained base model)
+# Ignore trained checkpoints (too large for git)
+checkpoints/
+checkpoints_attention/
+checkpoints_regression/
 *.pth
+*.pt
 *.onnx
 
 # Temporary files #
@@ -85,3 +88,8 @@ env/
 *.temp
 tmp/
 temp/
+temp_*/
+
+# Dataset files (too large) #
+#############################
+temp_dataset/

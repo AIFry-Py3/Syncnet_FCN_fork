@@ -79,18 +79,6 @@ def main():
         if effective_latency_sec > 2.0:
             logger.warning("High effective latency. Consider reducing buffer size or stride for real-time applications.")
 
-    parser = argparse.ArgumentParser(description="FCN SyncNet AV Sync Pipeline")
-    parser.add_argument('--video', type=str, required=True, help='Path to input video file')
-    parser.add_argument('--pretrained', type=str, default=None, help='Path to pretrained SyncNet weights (optional)')
-    parser.add_argument('--window_size', type=int, default=25, help='Frames per window (default: 25)')
-    parser.add_argument('--stride', type=int, default=5, help='Window stride (default: 5)')
-    parser.add_argument('--buffer_size', type=int, default=100, help='Temporal buffer size (default: 100)')
-    parser.add_argument('--use_attention', action='store_true', help='Use attention model (default: False)')
-    parser.add_argument('--trace', action='store_true', help='Return per-window trace (default: False)')
-    parser.add_argument('--temp_dir', type=str, default='temp', help='Temporary directory for audio extraction')
-    parser.add_argument('--target_size', type=int, nargs=2, default=[112, 112], help='Target video frame size (HxW)')
-    args = parser.parse_args()
-
     import shutil
     import glob
     import csv
