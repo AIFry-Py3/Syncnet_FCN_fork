@@ -36,8 +36,7 @@ const bufferSizeInput = document.getElementById('bufferSize');
 const syncBadge = document.getElementById('syncBadge');
 const offsetFrames = document.getElementById('offsetFrames');
 const offsetSeconds = document.getElementById('offsetSeconds');
-const confidenceValue = document.getElementById('confidenceValue');
-const confidenceFill = document.getElementById('confidenceFill');
+
 const processingTime = document.getElementById('processingTime');
 const videoName = document.getElementById('videoName');
 const interpretationBox = document.getElementById('interpretationBox');
@@ -333,18 +332,12 @@ function displayResults(result, sourceUrl = null) {
     resultsSection.classList.remove('hidden');
     
     const offset = result.offset_frames;
-    const confidence = result.confidence;
     const time = result.processing_time;
     const video = result.video_name || sourceUrl || (selectedFile ? selectedFile.name : 'Stream');
     
     // Update offset
-    offsetFrames.textContent = offset >= 0 ? `+${offset.toFixed(1)}` : offset.toFixed(1);
+    offsetFrames.textContent = offset >= 0 ? `+${offset}` : offset;
     offsetSeconds.textContent = `${(offset / 25).toFixed(3)} seconds`;
-    
-    // Update confidence
-    const confidencePercent = Math.round(confidence * 100);
-    confidenceValue.textContent = confidencePercent;
-    confidenceFill.style.width = `${confidencePercent}%`;
     
     // Update processing time
     processingTime.textContent = time.toFixed(2);
