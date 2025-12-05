@@ -734,6 +734,113 @@ class StreamSyncFCN(nn.Module):
         
         return result
     
+    def detect_offset_correlation(self, video_path, calibration_offset=3, calibration_scale=-0.5, 
+                                    calibration_baseline=-15, temp_dir='temp', verbose=True):
+        """
+        Detect AV offset using correlation-based method with calibration.
+        
+        This method uses the trained audio-video encoders to compute temporal
+        correlation and find the best matching offset. A linear calibration
+        is applied to correct for systematic bias in the model.
+        
+        Calibration formula: calibrated = calibration_offset + calibration_scale * (raw - calibration_baseline)
+        Default values determined empirically from test videos.
+        
+        Args:
+            video_path: Path to video file
+            calibration_offset: Baseline expected offset (default: 3)
+            calibration_scale: Scale factor for raw offset (default: -0.5)
+            calibration_baseline: Baseline raw offset (default: -15)
+            temp_dir: Temporary directory for audio extraction
+            verbose: Print progress information
+            
+        Returns:
+            offset: Calibrated offset in frames (positive = audio ahead)
+            confidence: Detection confidence (correlation strength)
+            raw_offset: Uncalibrated raw offset from correlation
+            
+        Example:
+            >>> model = StreamSyncFCN(pretrained_syncnet_path='data/syncnet_v2.model')
+            >>> offset, conf, raw = model.detect_offset_correlation('video.mp4')
+            >>> print(f"Detected offset: {offset} frames")
+        """
+        import python_speech_features
+        from scipy.io import wavfile
+        
+        if verbose:
+            print(f"Processing: {video_path}")
+        
+        # Extract audio MFCC
+        os.makedirs(temp_dir, exist_ok=True)
+        audio_path = os.path.join(temp_dir, 'temp_audio.wav')
+        
+        cmd = ['ffmpeg', '-y', '-i', video_path, '-ac', '1', '-ar', '16000',
+               '-vn', '-acodec', 'pcm_s16le', audio_path]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        sample_rate, audio = wavfile.read(audio_path)
+        mfcc = python_speech_features.mfcc(audio, sample_rate, numcep=13)
+        audio_tensor = torch.FloatTensor(mfcc.T).unsqueeze(0).unsqueeze(0)
+        
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        
+        # Extract video frames
+        cap = cv2.VideoCapture(video_path)
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = cv2.resize(frame, (112, 112))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame.astype(np.float32) / 255.0)
+        cap.release()
+        
+        if not frames:
+            raise ValueError(f"No frames extracted from {video_path}")
+        
+        video_tensor = torch.FloatTensor(np.stack(frames)).permute(3, 0, 1, 2).unsqueeze(0)
+        
+        if verbose:
+            print(f"  Audio MFCC: {audio_tensor.shape}, Video: {video_tensor.shape}")
+        
+        # Compute correlation-based offset
+        with torch.no_grad():
+            # Get features from encoders
+            audio_feat = self.fcn_model.audio_encoder(audio_tensor)
+            video_feat = self.fcn_model.video_encoder(video_tensor)
+            
+            # Align temporal dimensions
+            min_t = min(audio_feat.shape[2], video_feat.shape[2])
+            audio_feat = audio_feat[:, :, :min_t]
+            video_feat = video_feat[:, :, :min_t]
+            
+            # Compute correlation map
+            correlation = self.fcn_model.correlation(video_feat, audio_feat)
+            
+            # Average over time dimension
+            corr_avg = correlation.mean(dim=2).squeeze(0)
+            
+            # Find best offset (argmax of correlation)
+            best_idx = corr_avg.argmax().item()
+            raw_offset = best_idx - self.max_offset
+            
+            # Compute confidence as peak prominence
+            corr_np = corr_avg.numpy()
+            peak_val = corr_np[best_idx]
+            median_val = np.median(corr_np)
+            confidence = peak_val - median_val
+            
+            # Apply linear calibration: calibrated = offset + scale * (raw - baseline)
+            calibrated_offset = int(round(calibration_offset + calibration_scale * (raw_offset - calibration_baseline)))
+        
+        if verbose:
+            print(f"  Raw offset: {raw_offset}, Calibrated: {calibrated_offset}")
+            print(f"  Confidence: {confidence:.4f}")
+        
+        return calibrated_offset, confidence, raw_offset
+
     def process_hls_stream(self, hls_url, segment_duration=10, return_trace=False,
                           temp_dir='temp_hls', verbose=True):
         """
